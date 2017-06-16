@@ -66,11 +66,16 @@ def logfile(*write_tuple):
 
 def sanitize_year(date):
     # Some weired year entries are like this: 1982-1992, select rightmost entry
+    # This splits the date into a list, from which the last element is chosen
     date = date.split("-")[-1]
     # Some weired year entries contain non-numeral characters, remove them
     date = re.sub('[^0-9]','', date)
-    # Check that the year is within the range of retrieval, otherwise flag with year=0000
-    if date not in yearlist:
+    # Check that the year is within the range of retrieval, otherwise flag with year=0000; the year is a string and needs to be converted into an integer first!
+    # We need to check that date has only digits, otherwise the conversion into an integer will fail.
+    if date.isdigit():
+        if int(date) not in yearlist:
+            date = '0000'
+    else:
         date = '0000'
     # Add month & day to make it SQL-date compatible
     date = date + '-00-00'
@@ -80,23 +85,37 @@ def sanitize_name(name):
     name = name.strip()
     name = name.strip(',')
     name = name.strip('.')
+    # Add dot back to abbreviated first name???
     if re.search('[\s\.]\w$', name):
         name += '.'
     return name
 
+def sanitize_issn(issn):
+    # Remove all non-allowed characters
+    issn = re.sub('[^0-9Xx-]','', issn)
+    # Limit the amount of characters to 18
+    issn = issn[:18]
+    return issn
+
 # This function takes a chunk of 200 bibliographical entries as a text  and looks for
 # the AU, TI, etc. and puts them into a list; field can be ID, AU, T1, SN, PY, UR
+# Returning a list of lists is not good, change later
 def extract(text, field):
+    # Makes a list of strings, separates the text at e.g. "PY  - " WHY TWO SPACES???, DOESN'T WORK WITH ONE SPACE!!!
     element = text.split('{0}  - '.format(field))
     if len(element) > 1:
         element.pop(0)
         result = []
         for e in element:
+            # Splits at the end of the first line to get the value of the field; if there is other crap behind the year, it is included in the result
             result += [e.split('\n', 1)]
+        # The Melinda data is sometimes very messed up and needs special treatment before it can go to a clean database
         if (field == 'PY'):
-            date = sanitize_year(result[0][0])
+            result[0][0] = sanitize_year(result[0][0])
         if (field == 'AU'):
-            author = sanitize_name(result[0][0])
+            result[0][0] = sanitize_name(result[0][0])
+        if (field == 'SN'):
+            result[0][0] = sanitize_issn(result[0][0])
         return result
     else:
         #print('unknown')
@@ -105,6 +124,7 @@ def extract(text, field):
 def slowdown(multiplier):
     all = 4
     i = abs(random.gauss(5, 2)/5*float(multiplier)*all)
+    print("Waiting a randomly selected amount of time (" + str(round(i)) + " seconds) not to overload the server...")
     time.sleep(i)
 
 # Initialize the logfiles for debugging
@@ -125,7 +145,7 @@ def finalize_logfiles():
         zeit_string = str(round((elapsed_time_seconds/60))) + ' minutes'
     else:
         zeit_string = str(round(elapsed_time_seconds)) + ' seconds'
-    stat_string = '\n' + str(total_record_count) + ' records retrieved from Melinda.<br>\n' + str(written_to_database_count) + ' records put to the local SQL database (table: theses).<br>\n'
+    stat_string = '\n' + str(total_record_count) + ' records retrieved from Melinda.<br>\n' + str(written_to_database_count_total) + ' records put to the local SQL database (table: theses).<br>\n'
     stat_string += str(planned_requests) + ' requests should have been made to Melinda.<br\n' + str(sent_requests_count) + ' requests made to Melinda.<br>\n'
     stat_string += 'Script execution took ' + zeit_string + '.\n'
     stat_string += "</body>\n</html>\n"
@@ -150,17 +170,19 @@ def progress():
     return str(round(elapsed_time_minutes, 1)) + ' min (' + str(sent_requests_count) + ' of ' + str(planned_requests) + ' requests, ' + remaining_time_minutes + ' min remaining)'
 
 def searchloop(position, university_searchterm_list, yearlist, langlist):
-    global dosearch, sent_requests_count, total_record_count, previous_total_record_count, written_to_database_count
+    global dosearch, sent_requests_count, total_record_count, previous_total_record_count, written_to_database_count_total
     # Start iterating from the position that is specified by the position list (default 0, 0, 0 = beginning)
     # Since the values of the position are changed when the search is started anywhere else except the
     # beginning, the function must remember the original position (probably not true!!!)
     original_positon = position
     for u_count in range (position[0], len(university_searchterm_list)):
-        slowdown(slowdown_rate/3)
+        slowdown(slowdown_rate/20)
         for y_count in range (position[1], len(yearlist)):
-            slowdown(slowdown_rate/5)
+            slowdown(slowdown_rate/20)
             for l_count in range (position[2], len(langlist)):
                 slowdown(slowdown_rate/20)
+                # Local variable to count how many entries are put into the database for the current request
+                written_to_database_count_this_request = 0
                 # New request
                 # SEARCH TERMS
                 # University is searched for with WRD (consecutive word search)
@@ -219,7 +241,7 @@ def searchloop(position, university_searchterm_list, yearlist, langlist):
                         #    r =  requests.get(url)
                         #url = 'http://melinda.kansalliskirjasto.fi/viitteet/ref.pl?sessionID=' + id_string + '-17715&func=short-mail&records=SELECT&range=++++++++1-+++++++10&exportType=ris&mail=0&address='
 
-                        # Get the RIS data in chunks of chunksize (~250 seems to be the maximum the server can take)
+                        # Get the RIS data in chunks of chunksize (~250 seems to be the maximum the server can take) and add it to the "text" variable
                         text = ''
                         chunksize = 200
                         for i in range(chunksize,max_item,chunksize):
@@ -244,14 +266,19 @@ def searchloop(position, university_searchterm_list, yearlist, langlist):
                         text += '<h1 style="color:red">SECTION START' + str(start) + '-' + str(end) + '</h1>'
                         text += r.text
                         #logfile('<pre>', text, '</pre>')
+                        # Split the text file into records. A record in RIS format ends with "ER  -". ER = End of Reference (must be empty and the last tag).
                         text = text.split('ER  - \n')
                         text.pop()
                         # How many records are following
                         logfile(str(len(text)))
                         i = 1
+                        # This is the loop that is repeated for each entry in Melinda
                         for element in text:
+                            # Make a new line at the beginning of each record
+                            print('\n')
                             # Prints the whole record that is going to be parsed
                             logfile(str(i) + '. : ' + element, university_searchterm_list[u_count][1], str(yearlist[y_count]), langlist[l_count])
+                            # Calls the extract function and returns a list
                             melinda_id = extract(element, 'ID')[0][0]
                             author = extract(element, 'AU')[0][0]
                             title = extract(element, 'T1')[0][0]
@@ -276,7 +303,7 @@ def searchloop(position, university_searchterm_list, yearlist, langlist):
                                 cursor.execute(query, (melinda_id, title))
                                 rows = cursor.fetchall()
                                 if len(rows) == 0:
-                                    tmp = 'New record: ' + str(written_to_database_count) + ' of total ' + str(total_record_count) + ' retrieved records.'
+                                    tmp = 'New record: ' + str(written_to_database_count_total) + ' of total ' + str(total_record_count) + ' retrieved records.'
                                     logfile(tmp)
                                     query = "INSERT INTO theses (melinda_id, author, title, issn, date, url, university, language) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
                                     #query = "INSERT INTO theses (melinda_id, author, title, issn, date, url, university, language) VALUES ({0}, {1}, {2}, {3}, {4}, {5}, {6}, {7})".format(melinda_id, author, title, issn, date, url, university[1], language)
@@ -285,7 +312,8 @@ def searchloop(position, university_searchterm_list, yearlist, langlist):
                                         cursor.execute(query, (melinda_id, author, title, issn, date, url, university_searchterm_list[u_count][1], langlist[l_count]))
                                         #cursor.execute(query)
                                         sqlcon.commit()
-                                        written_to_database_count += 1
+                                        written_to_database_count_total += 1
+                                        written_to_database_count_this_request += 1
                                     except phddb.Error as e:
                                         if e[0]!= '':
                                             print(query)
@@ -319,7 +347,7 @@ def searchloop(position, university_searchterm_list, yearlist, langlist):
                                                 try:
                                                     cursor.execute(query)
                                                     sqlcon.commit()
-                                                    written_to_database_count += 1
+                                                    written_to_database_count_total += 1
                                                 except phddb.Error as e:
                                                     if e[0]!= '':
                                                         print(query)
@@ -335,7 +363,7 @@ def searchloop(position, university_searchterm_list, yearlist, langlist):
                                 logfile('write_to_short_logfile', '\n\nError with inserting new records into database: \n', str(e))
                                 return
                             logfile('\n')
-                        logfile('write_to_short_logfile', 'This request returned ' + str(total_record_count - previous_total_record_count) + ' records, inserted: ' + str(written_to_database_count) + ', total: ' + str(total_record_count))
+                        logfile('write_to_short_logfile', 'The current request returned ' + str(total_record_count - previous_total_record_count) + ' records.<br>\nRecords inserted for current request: ' + str(written_to_database_count_this_request) + '<br>\nTotal records retrived: ' + str(total_record_count) + '<br>\nTotal records inserted: ' + str(written_to_database_count_total))
                     else:
                         logfile('write_to_short_logfile', 'This request did not return any records' + ', total: ' + str(total_record_count))
                         # Wait between requesting the same data with a different language filter
@@ -381,7 +409,7 @@ sqldb = 'phddb'
 try:
     slowdown_rate = int((sys.argv[1]))
 except Exception as e:
-    slowdown_rate = 50
+    slowdown_rate = 1
 
 # Logfile names & location
 date = time.strftime("%Y-%m-%d")
@@ -492,7 +520,7 @@ with sqlcon:
     # Keep the previous total record count to calculate how many new records have been retrieved
     previous_total_record_count = 0
     # Count all records that have beeen put into the local database
-    written_to_database_count = 0
+    written_to_database_count_total = 0
     # Count all requests sent to Melinda
     sent_requests_count = 0
 
