@@ -30,8 +30,14 @@ The only thing you need to do before starting the script is to prepare the datab
 $ mysql -u root -p < phddb.sql (mysql-server)
 $ sudo mysql -u root < phddb.sql (mariadb-server)
 
-SCRIPT EXECUTION
+SCRIPT EXECUTION (RETRIEVAL OF THESES)
 $ python3 fin_phd_theses_scarper.py
+
+ANALYSIS (ADDING GENDER INFORMATION)
+To assign a gender to each entry in the theses table, you need to load first the data in the firstnames.sql file into the database:
+$ mysql -u phddb_user -p < phddb_firstnames.sql
+Then you need to execute the determine_gender.py script:
+$ python3 determine_gender.py
 
 SUPPORT
 This project has been generously supported by the Finnish Cultural Foundation.
